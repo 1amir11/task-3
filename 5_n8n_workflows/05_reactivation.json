@@ -1,0 +1,686 @@
+{
+  "name": "Cottonil - Reactivation (dormant high-value buyers)",
+  "nodes": [
+    {
+      "id": "bdf54566-94d8-4ff1-904d-42641679d521",
+      "name": "Run now (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cottonil-reactivation",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "webhookId": "5795bc22-096b-4e0e-bdf9-20887c1ae574"
+    },
+    {
+      "id": "04a6bcd1-97e9-4e83-a3a2-4125ae448501",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The only place to configure this workflow.\nconst TELEGRAM_CHAT_ID = '';  // put your Telegram chat ID here   // CRM manager's Telegram chat ID. Empty = the run waits as pending_approval.\nconst HOLDOUT_PCT = 10;        // random control group, so the lift can be measured\nconst COOLDOWN_DAYS = 90;      // never contact the same buyer twice inside this window\nconst j = $input.first().json;\nconst fromWebhook = !!j.headers;\nconst asked = (j.body && j.body.source) || '';\nreturn [{ json: {\n  source: fromWebhook ? (['dashboard', 'manual'].includes(asked) ? asked : 'api') : 'schedule',\n  from_webhook: fromWebhook,\n  chat_id: String(TELEGRAM_CHAT_ID).trim(),\n  holdout_pct: HOLDOUT_PCT, cooldown_days: COOLDOWN_DAYS\n} }];"
+      }
+    },
+    {
+      "id": "8185224b-4b7e-4b41-b416-faa92ef085b2",
+      "name": "Pick audience (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/reactivation_pick",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_source: $json.source, p_holdout_pct: $json.holdout_pct, p_cooldown_days: $json.cooldown_days }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "51ac437e-5558-4262-ae06-eef49ae61a8c",
+      "name": "Anyone to contact?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.selected }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "0224adc4-a40a-4652-aaff-b51e09aa6dd3",
+      "name": "Prepare message brief",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// One message per favourite-category group (not per customer): 1 LLM call, about 1k tokens.\nconst run = $input.first().json;\nconst AR = {\n  'Men boxers': 'البوكسرات الرجالي', 'Men tops': 'التيشيرتات الرجالي', 'Men underwear': 'الملابس الداخلية الرجالي',\n  'Men bottoms': 'البناطيل الرجالي', 'Women pajamas': 'البيجامات الحريمي', 'Women tops': 'البلوزات الحريمي',\n  'Women bras': 'الصدريات الحريمي', 'Women underwear': 'الملابس الداخلية الحريمي', 'Women bottoms': 'البناطيل الحريمي',\n  'Girls pajamas': 'البيجامات البناتي', 'Boys pajamas': 'البيجامات الولادي', 'Girls underwear': 'الملابس الداخلية البناتي',\n  'Kids underwear': 'الملابس الداخلية للأطفال', 'Socks': 'الشرابات', 'Home textiles': 'مفروشات البيت', 'Accessories': 'الإكسسوارات'\n};\nconst groups = (run.groups || []).map(g => ({ category: g.category, category_ar: AR[g.category] || g.category, customers: g.customers }));\nconst system = [\n  'You write short re-engagement messages for Cottonil, an Egyptian underwear and homewear brand, in Egyptian Arabic.',\n  'Write ONE message per category in the list. Each message:',\n  '- starts with {{first_name}} (the CRM fills it in), 110-220 characters;',\n  '- mentions the category naturally using its Arabic name;',\n  '- is warm and short, not pushy; at most one emoji;',\n  '- contains NO discount, price, percentage, number, date, free item or promise (do not claim a new collection);',\n  '- ends by inviting them to visit the nearest branch or the website.',\n  'Return JSON only: {\"messages\":[{\"category\":\"<English category exactly as given>\",\"text\":\"...\"}]}'\n].join('\\n');\nreturn [{ json: {\n  run, groups, ar: AR,\n  request_body: {\n    model: 'openai/gpt-4.1-mini', temperature: 0.4, response_format: { type: 'json_object' },\n    messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(groups) }]\n  }\n} }];"
+      }
+    },
+    {
+      "id": "4bc194c7-4c13-4ae3-92aa-728cb861967d",
+      "name": "Write messages (OpenRouter)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "openRouterApi": {
+          "id": "VpUansl3XxDGcyJI",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "634db84e-c01d-4534-8804-ae4176b91dd3",
+      "name": "Check messages + build reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Guardrail on generated text: a message with a number, a discount word or no {{first_name}} is replaced\n// by a safe template. The brand never promises something the business did not approve.\nconst b = $('Prepare message brief').first().json;\nconst run = b.run;\nlet llm = [];\ntry { llm = JSON.parse($input.first().json.choices[0].message.content).messages || []; } catch (e) { llm = []; }\nconst BANNED = /[0-9\\u0660-\\u0669%]|خصم|تخفيض|عرض|مجان|ببلاش|كوبون/;\nconst ok = t => typeof t === 'string' && t.includes('{{first_name}}') && t.length >= 60 && t.length <= 300\n  && /[\\u0600-\\u06FF]/.test(t) && !BANNED.test(t.replace('{{first_name}}', ''));\nconst template = g => '{{first_name}}، وحشتنا في كوتونيل! ' + g.category_ar + ' اللي بتحبها مستنياك في أقرب فرع أو على الموقع.';\nlet fromLlm = 0;\nconst messages = b.groups.map(g => {\n  const m = llm.find(x => x && x.category === g.category);\n  if (m && ok(m.text)) { fromLlm++; return { category: g.category, customers: g.customers, text: m.text.trim(), source: 'llm' }; }\n  return { category: g.category, customers: g.customers, text: template(g), source: 'template' };\n});\nconst nf = n => Number(n || 0).toLocaleString('en-US');\nconst top = messages.slice(0, 3).map(m => m.category + ' (' + nf(m.customers) + ')').join(', ');\nconst summary = 'Run #' + run.run_id + ': ' + nf(run.selected) + ' high-value buyers dormant for over a year (' + nf(run.past_spend_egp)\n  + ' EGP past spend). ' + nf(run.treatment) + ' to contact, ' + nf(run.holdout) + ' held out to measure the lift. Top groups: ' + top\n  + '. ' + messages.length + ' messages (' + fromLlm + ' AI-written, ' + (messages.length - fromLlm) + ' template). Waiting for CRM approval.';\nreturn [{ json: {\n  run, messages, summary, llm_messages: fromLlm,\n  response: { status: 'pending_approval', summary, run_id: run.run_id, selected: run.selected, treatment: run.treatment,\n              holdout: run.holdout, past_spend_egp: run.past_spend_egp, groups: messages.length,\n              sample_message: messages[0] ? messages[0].text : '' }\n} }];"
+      }
+    },
+    {
+      "id": "9650edc3-63ec-41ea-ab95-49d0d9a2cc9e",
+      "name": "Reply to dashboard",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1680,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "5b42c1d4-9771-4a8c-825a-a52e0a28e54f",
+      "name": "Telegram set up?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $(\"Config\").first().json.chat_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d9c5c51b-1268-40f7-9b0e-47aadf65a2f6",
+      "name": "Ask CRM manager to approve",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2160,
+        200
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendAndWait",
+        "chatId": "={{ $(\"Config\").first().json.chat_id }}",
+        "message": "={{ 'حملة استرجاع العملاء #' + $('Check messages + build reply').first().json.run.run_id + '\\n\\n' +\n'العملاء: ' + Number($('Check messages + build reply').first().json.run.treatment).toLocaleString('en-US') + ' هيتبعتلهم، و' + Number($('Check messages + build reply').first().json.run.holdout).toLocaleString('en-US') + ' holdout للقياس.\\n' +\n'مشترياتهم السابقة: ' + Number($('Check messages + build reply').first().json.run.past_spend_egp).toLocaleString('en-US') + ' جنيه.\\n\\n' +\n$('Check messages + build reply').first().json.messages.slice(0, 3).map(m => '• ' + m.category + ' (' + m.customers + ')\\n' + m.text.split('{' + '{first' + String.fromCharCode(95) + 'name}' + '}').join('[الاسم]')).join('\\n\\n') +\n'\\n\\nمن غير خصومات. القايمة فيها customer ID بس. توافق؟' }}",
+        "responseType": "approval",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "✅ موافق",
+            "disapproveLabel": "❌ رفض"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 48,
+              "resumeUnit": "hours"
+            }
+          },
+          "appendAttribution": false
+        }
+      },
+      "webhookId": "e23ce84d-7564-4cd6-962d-61b84d988b9b",
+      "credentials": {
+        "telegramApi": {
+          "id": "30Gmu1xOSbfxIDAC",
+          "name": "Cottonil_project"
+        }
+      }
+    },
+    {
+      "id": "e29d846c-99ca-4309-b935-98f708544281",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2400,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.data && $json.data.approved === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "f3642508-e252-4a25-8921-2c5415a9dc7f",
+      "name": "Mark approved (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2640,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/reactivation_decide",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_run_id: $('Check messages + build reply').first().json.run.run_id, p_decision: 'approved', p_messages: $('Check messages + build reply').first().json.messages, p_summary: $('Check messages + build reply').first().json.summary }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "a7bfae7e-25a4-4288-9a10-d5cccaa2b856",
+      "name": "Confirm hand-off to CRM",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2880,
+        100
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $(\"Config\").first().json.chat_id }}",
+        "text": "={{ '✅ اتسجلت الموافقة على حملة #' + $json.run_id + '.\\nالقايمة جاهزة للـ CRM: جدول reactivation_members (run_id = ' + $json.run_id + ', arm = treatment).\\nبعد 30 يوم قارن الشراء بين treatment و holdout (reactivation_results).' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "webhookId": "8cbfe4b3-5e0e-42e1-8600-a9462c427019",
+      "credentials": {
+        "telegramApi": {
+          "id": "30Gmu1xOSbfxIDAC",
+          "name": "Cottonil_project"
+        }
+      }
+    },
+    {
+      "id": "70c5728a-8f41-4de8-afa7-d9f4d33ebf0f",
+      "name": "Mark rejected or expired (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2640,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/reactivation_decide",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_run_id: $('Check messages + build reply').first().json.run.run_id, p_decision: ($json.data && $json.data.approved === false) ? 'rejected' : 'expired', p_messages: $('Check messages + build reply').first().json.messages, p_summary: $('Check messages + build reply').first().json.summary }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "f1faa6b5-d490-4401-8be1-92b9d0029697",
+      "name": "No chat ID: stays pending_approval",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        420
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "9b27a99c-c1c9-4ef9-9b9b-bd799be6021d",
+      "name": "Nothing to do",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        520
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const r = $input.first().json;\nconst summary = 'Run #' + r.run_id + ': no high-value dormant buyer is outside the ' + $('Config').first().json.cooldown_days + '-day cooldown. Nothing to send.';\nreturn [{ json: { response: { status: 'nothing_to_do', summary, run_id: r.run_id } } }];"
+      }
+    },
+    {
+      "id": "48e15a46-a7a1-4773-9067-2eb5f892e9ca",
+      "name": "Reply: nothing to do",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1200,
+        520
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "4715dc24-8e91-4770-8de8-b7d607d61bbb",
+      "name": "1st of month 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        500
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "monthsInterval": 1,
+              "triggerAtDayOfMonth": 1,
+              "triggerAtHour": 9,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "cb4bc83c-90ff-48dd-a805-4dd907792fbf",
+      "name": "Sticky Note 0306ae05",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ],
+      "parameters": {
+        "content": "## 1 · Pick (Supabase)\nHigh-value buyers dormant > 365 days. Skips anyone contacted in the last 90 days. 10% random holdout (hash of customer + run) so the lift can be measured. Only customer_id leaves the database.",
+        "color": 7
+      }
+    },
+    {
+      "id": "9826b61e-c1f7-4e7d-bf0b-663ae0f6f554",
+      "name": "Sticky Note e6c516bc",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        560
+      ],
+      "parameters": {
+        "content": "## 2 · Write + check\nOne message per favourite-category group: 1 OpenRouter call. Code guardrail: no number, %, discount word, or missing {{first_name}}; otherwise a safe template is used.",
+        "color": 4
+      }
+    },
+    {
+      "id": "2a7afd67-152d-4ec7-aa90-c2050ddcbb52",
+      "name": "Sticky Note 6d0f45ab",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        816
+      ],
+      "parameters": {
+        "content": "## 3 · Human approval\nDashboard gets the summary at once. The CRM manager approves in Telegram (48 h). The decision and the messages are stored on the run; nothing is sent to customers without a yes.",
+        "color": 6
+      }
+    }
+  ],
+  "connections": {
+    "Run now (POST)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Pick audience (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick audience (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Anyone to contact?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anyone to contact?": {
+      "main": [
+        [
+          {
+            "node": "Prepare message brief",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing to do",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare message brief": {
+      "main": [
+        [
+          {
+            "node": "Write messages (OpenRouter)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write messages (OpenRouter)": {
+      "main": [
+        [
+          {
+            "node": "Check messages + build reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check messages + build reply": {
+      "main": [
+        [
+          {
+            "node": "Reply to dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply to dashboard": {
+      "main": [
+        [
+          {
+            "node": "Telegram set up?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram set up?": {
+      "main": [
+        [
+          {
+            "node": "Ask CRM manager to approve",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No chat ID: stays pending_approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask CRM manager to approve": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Mark approved (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark rejected or expired (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark approved (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Confirm hand-off to CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nothing to do": {
+      "main": [
+        [
+          {
+            "node": "Reply: nothing to do",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1st of month 09:00": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {
+    "description": "Monthly + on-demand reactivation of high-value dormant buyers: Supabase picks the audience with a 10% holdout, OpenRouter writes one guarded Arabic message per category, CRM manager approves in Telegram."
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "name": "Cottonil - Error alerts",
+  "nodes": [
+    {
+      "id": "5836dc30-6234-4300-a00d-d2f100095f78",
+      "name": "When a Cottonil workflow fails",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "d8ed80bb-4987-448b-84e4-54c40c12866e",
+      "name": "Build incident row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Every failure (ingestion gap, eval below 90%, crashed node) becomes one queryable row in assistant_log.\nconst e = $input.first().json;\nconst ex = e.execution || {};\nconst wf = e.workflow || {};\nconst msg = (ex.error && (ex.error.message || ex.error.description)) || 'Unknown error';\nreturn [{ json: {\n  session_id: 'system',\n  channel: 'system',\n  question: 'Workflow failed: ' + (wf.name || wf.id || 'unknown'),\n  status: 'error',\n  answer: 'Failed at node: ' + (ex.lastNodeExecuted || 'unknown') + (ex.url ? ' | ' + ex.url : ''),\n  error: String(msg).slice(0, 2000),\n  source: wf.id || null\n} }];"
+      }
+    },
+    {
+      "id": "e69301a1-8b97-4416-8748-7c5e43264211",
+      "name": "Log incident (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "assistant_log",
+        "dataToSend": "autoMapInputData"
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "88f5d08f-ca14-4477-9e01-21b6871c6605",
+      "name": "Sticky Note 36321f5d",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ],
+      "parameters": {
+        "content": "## Incident log\nSet as the Error Workflow of the 3 Cottonil workflows. Each production failure lands in public.assistant_log with channel = system, so failures are visible next to normal traffic.\nQuery: select * from assistant_log where channel = 'system' order by created_at desc;",
+        "color": 3
+      }
+    }
+  ],
+  "connections": {
+    "When a Cottonil workflow fails": {
+      "main": [
+        [
+          {
+            "node": "Build incident row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build incident row": {
+      "main": [
+        [
+          {
+            "node": "Log incident (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {
+    "description": "Error workflow for the Cottonil RAG system: logs every production failure of the ingestion, assistant and eval workflows into Supabase assistant_log."
+  }
+}

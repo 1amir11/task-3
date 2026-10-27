@@ -1,0 +1,865 @@
+{
+  "name": "Cottonil - Assistant (RAG agent)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cottonil-assistant",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "72c3e450-8110-4a0f-80ce-b3d91190dc11",
+      "name": "Ask (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        400
+      ],
+      "webhookId": "3b829f83-884e-4459-b307-c8f698b74152"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Guard the door: bad input is rejected here, before it costs a single token.\n// Bump PROMPT_VERSION whenever the prompt or model changes: cached answers from older versions are never reused.\nconst PROMPT_VERSION = 'v5-2026-10-25';\nconst MODEL = 'openai/gpt-4.1-mini (fallback google/gemini-2.5-flash)';\nconst b = $input.first().json.body || {};\nconst raw = (b.chatInput ?? b.question ?? '').toString();\nconst question = raw.replace(/\\s+/g, ' ').trim();\nconst sessionId = (b.sessionId || 'anonymous').toString().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'anonymous';\nconst channel = ['dashboard', 'eval', 'api'].includes(b.channel) ? b.channel : 'dashboard';\nconst isArabic = /[؀-ۿ]/.test(question);\nlet reason = '', kind = '';\nif (question.length < 3) { kind = 'input'; reason = 'The question is empty or too short.'; }\nelse if (question.length > 500) { kind = 'input'; reason = 'The question is too long (max 500 characters).'; }\n// Privacy: a customer ID + a personal field is refused in code, so it never reaches the model (or its memory).\nelse if (/\\bC\\d{4,}\\b/i.test(question) && /(name|phone|mobile|e-?mail|address|contact|اسم|تليفون|تلفون|موبايل|رقم|ايميل|إيميل|عنوان|تواصل)/i.test(question)) {\n  kind = 'privacy';\n  reason = isArabic\n    ? 'مقدرش أدي بيانات شخصية عن عميل معين (اسم، تليفون، عنوان). أقدر أديك أرقام مجمّعة عن العملاء، زي عدد العملاء اللي بطّلوا يشتروا.'\n    : 'I cannot share personal data about an individual customer (name, phone, address). I can give aggregated customer numbers instead, such as how many customers are dormant.';\n}\nreturn [{ json: {\n  question, sessionId, channel, isArabic,\n  valid: !reason, reason, kind,\n  prompt_version: PROMPT_VERSION, model: MODEL,\n  started_at: Date.now(),\n  request_id: $execution.id\n} }];"
+      },
+      "id": "ac61b385-337a-4b17-bb3c-838276eccf53",
+      "name": "Validate request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8ae1dfc8-07db-417a-99a1-888172feb5eb",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        448,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/assistant_cache_lookup",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_question: $json.question, p_version: $json.prompt_version }) }}",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "8929e931-fb89-4dff-96f6-21d1a5e65d6b",
+      "name": "Cache lookup (24h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        672,
+        304
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.id || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "leftValue": "={{ $(\"Validate request\").first().json.channel }}",
+              "rightValue": "eval",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0e91dfd8-a264-4f1d-aefd-9b7bea9ff0a1",
+      "name": "Cache hit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        880,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $input.first().json;\nreturn [{ json: {\n  status: c.status, http_status: 200, answer: c.answer, value: c.value, unit: c.unit, period: c.period,\n  grain: c.grain, source: c.source, sql: c.sql, why: c.why, grounded: c.grounded,\n  ungrounded_numbers: c.ungrounded_numbers || [], kb_ids: c.kb_ids || [], tool_calls: 0,\n  cached: true, cached_from: c.id\n} }];"
+      },
+      "id": "bf20df68-d091-451f-b26e-e39cf7dd1cde",
+      "name": "Cached reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One exit for every path (rejected, cached, answered, refused, error) = one response shape + one log row.\nconst v = $('Validate request').first().json;\nconst r = $input.first().json;\nconst latency_ms = Date.now() - v.started_at;\n// \"41.0% and 29.2%\" already carries its unit: do not let the UI print \"%%\".\nconst unit = r.unit && String(r.value || '').trim().endsWith(r.unit) ? '' : (r.unit || '');\nconst response = {\n  status: r.status, answer: r.answer || '', value: r.value || '', unit, period: r.period || '',\n  grain: r.grain || '', source: r.source || '', sql: r.sql || '', why: r.why || '',\n  grounded: r.grounded ?? null, warning: r.warning || '', cached: !!r.cached,\n  evidence: r.evidence || (r.cached ? 'cache' : 'none'), retrieval: r.retrieval || null,\n  tools_used: r.tools_used || [], kb_ids: r.kb_ids || [], latency_ms, request_id: v.request_id\n};\nconst log = {\n  session_id: v.sessionId, channel: v.channel, question: v.question || '(empty)', status: r.status,\n  answer: response.answer, value: response.value, unit: response.unit, period: response.period,\n  grain: response.grain, source: response.source, sql: response.sql, why: response.why,\n  grounded: r.grounded ?? null, ungrounded_numbers: r.ungrounded_numbers || [], kb_ids: r.kb_ids || [],\n  tool_calls: r.tool_calls || 0, model: r.cached || r.status === 'rejected' || v.kind === 'privacy' ? null : v.model,\n  prompt_version: v.prompt_version,\n  latency_ms, cached: !!r.cached, error: r.error || null,\n  evidence: response.evidence, retrieval: response.retrieval, tools_used: response.tools_used\n};\nreturn [{ json: { http_status: r.http_status || 200, response, log } }];"
+      },
+      "id": "80663baa-4c62-4e4e-96e5-c81f4d0672df",
+      "name": "Finalize response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"openai/text-embedding-3-small\", input: $(\"Validate request\").first().json.question }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "4ead519c-f41a-44ed-a24b-9c1d92eae0a0",
+      "name": "Embed question (OpenRouter)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1104,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "openRouterApi": {
+          "id": "VpUansl3XxDGcyJI",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/kb_search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query_text: $(\"Validate request\").first().json.question, query_embedding: ($json.data && $json.data[0] && $json.data[0].embedding) ? \"[\" + $json.data[0].embedding.join(\",\") + \"]\" : null, match_count: 8 }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "d4a8d5f9-3a8c-44b8-b54a-345c35587f28",
+      "name": "Hybrid search (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1328,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rank-ordered context with stable ids so the model can cite [KB-n], trust rules first.\nconst v = $('Validate request').first().json;\nlet usedVector = true;\ntry { const e = $('Embed question (OpenRouter)').first().json; usedVector = !!(e.data && e.data[0]); } catch (err) { usedVector = false; }\nconst order = { trust_rule: 0, sql_example: 1, metric: 2, glossary: 3, finding: 4 };\nconst chunks = $input.all().map(i => i.json).filter(c => c && c.id != null)\n  .sort((a, b) => (order[a.chunk_type] ?? 9) - (order[b.chunk_type] ?? 9) || b.score - a.score);\nconst context = chunks.map(c => {\n  const va = c.metadata && c.metadata.verified_answer ? '\\nverified_answer: ' + c.metadata.verified_answer : '';\n  const topic = c.metadata && c.metadata.topic ? ' (topic: ' + c.metadata.topic + ')' : '';\n  return '[KB-' + c.id + '] ' + c.chunk_type + topic + ' | ' + c.title + '\\n' + c.content + va;\n}).join('\\n\\n');\nreturn [{ json: {\n  question: v.question,\n  sessionId: v.sessionId,\n  // Decided in code from the question's script, so a refusal never switches language.\n  reply_language: v.isArabic ? 'Egyptian Arabic (keep numbers in Western digits)' : 'English',\n  context: context || 'No knowledge base entry matched. Use get_schema and run_sql, or refuse if the topic is not covered.',\n  kb_ids: chunks.map(c => c.id),\n  trust_hits: chunks.filter(c => c.chunk_type === 'trust_rule').map(c => c.id),\n  retrieval: usedVector ? 'hybrid' : 'keyword_only'\n} }];"
+      },
+      "id": "50c397cf-5115-4a6a-8641-f30e7e4e89ac",
+      "name": "Build context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=QUESTION: {{ $json.question }}\nREPLY LANGUAGE: {{ $json.reply_language }} (answer, why and refusal text must all be in this language)\nAnswer ONLY this QUESTION. Earlier turns are only for resolving references such as \"them\" or \"that year\"; never repeat or reuse an earlier answer, and run_sql again for any number.\n\nCONTEXT (retrieved, rank-ordered):\n{{ $json.context }}",
+        "hasOutputParser": true,
+        "needsFallback": true,
+        "options": {
+          "systemMessage": "You are the Cottonil data assistant for the management team. You answer questions about Cottonil sales, customers, categories, discounts, returns and costs (Oct 2018 - Sep 2026, synthetic case data).\n\nYou receive the QUESTION, the REPLY LANGUAGE and a CONTEXT block retrieved from the knowledge base. Each context entry has an id like [KB-33] and a type:\n- glossary / metric: definitions you must respect.\n- finding: analysed insights (use for \"why it matters\").\n- trust_rule: topics that must be refused or limited.\n- sql_example: a verified query with its verified_answer.\n\nTOOLS\n- get_schema: lists every analytics view, its columns, and the data_trust table (topic, status, safe_to_say, cannot_answer, reason). Call it before writing SQL that is not an adaptation of a sql_example.\n- run_sql: runs ONE read-only SELECT on analytics.* (max 200 rows). Returns {ok, rows} or {ok:false, error, hint}. If it errors, read the error and hint, fix the query and retry (max 2 retries).\n- search_kb: keyword search in the knowledge base when the CONTEXT is not enough.\n\nPROCEDURE (follow in order)\n1. Safety first. If a trust_rule in CONTEXT matches the question, or data_trust marks the topic not_usable: do NOT compute anything. Set status \"refused\", explain the reason in one sentence, and offer what CAN be answered (safe_to_say). Personal data about any individual customer (name, phone, address, contact) is always refused, even for \"our best customer\".\n2. Otherwise ALWAYS call run_sql, even when a sql_example has a verified_answer: adapt the closest sql_example (or use get_schema) so the number is live. Prefer copying the sql_example and changing only what the question needs. The verified_answer is only a cross-check: if your result differs, report the SQL result and say it differs from the last verified value.\n3. Use the ready columns: views are already aggregated per their grain. Use aov_egp for average order value, gm_pct for margin %, share_of_year_pct for category share, *_index for seasonality. Never avg() a total column (net_egp, orders...) to get an average; never sum a percent column.\n4. Be efficient: write ONE query that returns every row you need (e.g. select band, gm_pct from analytics.discount_band order by band_order), never one query per category, band or year. Use at most 3 run_sql calls in total. As soon as you have the numbers, stop calling tools and write the final answer.\n5. Check the result before answering. If any column you need is null, or a value looks impossible (e.g. growth above 1000%, a share above 100%, an average order above 100,000 EGP), your SQL has a bug: check every date filter, denominator and column, and run a corrected query. Never tell the user a number is unavailable when its parts are in your result.\n6. Every number in your answer must come from a run_sql result in this turn, including shares, ratios, multiples and differences: compute them inside the SQL, never in your head. Never estimate, never use memory.\n7. Ambiguous questions: if a question has two reasonable readings (e.g. \"grew the most\" = biggest EGP increase or biggest growth multiple), answer the main reading and give the other in one short sentence, both from SQL.\n8. State the grain (per year, per customer, per order line...) and the time window. 2026 is a partial year (to Sep): never compare it with a full year; use the same months instead.\n9. No causal claims: say \"associated with\", not \"caused by\". Forecast or what-if requests: give trend, seasonality or a clearly labelled scenario only, and say the volume response is unknown.\n10. Write answer, why and any refusal in the REPLY LANGUAGE, 2-4 short sentences. Money in EGP with thousands separators; percentages with 1-2 decimals.\n\nOUTPUT FIELDS\nstatus: \"answered\" or \"refused\". answer: the reply text. value: the single headline number as written in the answer (\"\" if none). unit: \"EGP\", \"%\", \"customers\", \"x\"... period: e.g. \"2025\" or \"Jan-Sep 2026 vs Jan-Sep 2025\". grain: e.g. \"year\". source: views or KB ids used, e.g. \"analytics.kpi_yearly, KB-33\". sql: the final SQL you ran (\"\" if none). why: one line on why this matters for the business (from a finding if one fits).",
+          "maxIterations": 8,
+          "returnIntermediateSteps": true,
+          "enableStreaming": false
+        }
+      },
+      "id": "153b2bcf-d815-486a-b38d-2db890a94516",
+      "name": "Cottonil data agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1728,
+        400
+      ],
+      "retryOnFail": false,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "options": {
+          "temperature": 0,
+          "timeout": 25000,
+          "maxRetries": 1
+        }
+      },
+      "id": "47785ccd-4adc-47ed-867b-78e5d99e8291",
+      "name": "OpenRouter model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1568,
+        720
+      ],
+      "credentials": {
+        "openRouterApi": {
+          "id": "VpUansl3XxDGcyJI",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Build context').item.json.sessionId }}",
+        "contextWindowLength": 4
+      },
+      "id": "1cb2698c-4368-4d55-9796-d8957c449767",
+      "name": "Session memory (last 4 turns)",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [
+        1712,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Returns every analytics view with its columns, plus the data_trust table (topic, status usable / usable_with_caveat / not_usable, safe_to_say, cannot_answer, reason). No input needed.",
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/assistant_schema",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {}
+      },
+      "id": "a8f454c1-f654-475a-bdc5-188872e82b0f",
+      "name": "get_schema",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.5,
+      "position": [
+        1840,
+        720
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Runs ONE read-only Postgres SELECT on the analytics views and returns {ok, row_count, rows} or {ok:false, error}. Writes, multiple statements and raw tables are blocked by the database.",
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/assistant_run_sql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('sql', 'One SELECT (or WITH ... SELECT) over analytics.* views, schema-qualified, e.g. select net_egp from analytics.kpi_yearly where yr = 2025') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2d2b9b84-d9c7-4c1a-aada-f6f8576fc461",
+      "name": "run_sql",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.5,
+      "position": [
+        1984,
+        720
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Keyword search in the Cottonil knowledge base (definitions, findings, trust rules, verified SQL examples). Use when the CONTEXT does not cover the question.",
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/kb_search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query_text",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('query', 'A few keywords, Arabic or English, e.g. dormant customers') }}"
+            },
+            {
+              "name": "match_count",
+              "value": "5"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7e93c8f6-4d69-4b67-bdda-aa7e25ff2507",
+      "name": "search_kb",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.5,
+      "position": [
+        2128,
+        720
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"required\":[\"status\",\"answer\",\"value\",\"unit\",\"period\",\"grain\",\"source\",\"sql\",\"why\"],\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"answered\",\"refused\"]},\"answer\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"},\"unit\":{\"type\":\"string\"},\"period\":{\"type\":\"string\"},\"grain\":{\"type\":\"string\"},\"source\":{\"type\":\"string\"},\"sql\":{\"type\":\"string\"},\"why\":{\"type\":\"string\"}}}"
+      },
+      "id": "2ffbc8a9-851a-4f51-9061-a58361d57e6a",
+      "name": "Answer schema",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        2272,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Graceful failure: the user gets a clear message, the error goes to the log.\nconst v = $('Validate request').first().json;\nconst err = $input.first().json.error || $input.first().json;\nreturn [{ json: {\n  status: 'error', http_status: 200,\n  answer: v.isArabic ? 'حصلت مشكلة مؤقتة وأنا بجهز الإجابة. جرّب تاني بعد دقيقة.' : 'Something went wrong while preparing the answer. Please try again in a minute.',\n  error: (typeof err === 'string' ? err : (err.message || JSON.stringify(err))).slice(0, 1000),\n  cached: false, grounded: null\n} }];"
+      },
+      "id": "a1be496e-243e-4518-ab7b-936f1daabbce",
+      "name": "Agent failed reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Bad input gets 400; a privacy request is a normal refusal (200), decided in code with zero tokens.\nconst v = $input.first().json;\nif (v.kind === 'privacy') return [{ json: {\n  status: 'refused', http_status: 200, answer: v.reason,\n  why: v.isArabic ? 'حماية البيانات الشخصية للعملاء.' : 'Customer personal data is protected.',\n  source: 'privacy rule (code)', evidence: 'trust_rule', grounded: true, cached: false\n} }];\nreturn [{ json: { status: 'rejected', http_status: 400, answer: v.reason, cached: false } }];"
+      },
+      "id": "429bc2ba-38a1-43ba-9d4b-e3f8a54c4600",
+      "name": "Rejected reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hallucination guard: every number in the answer must exist in the evidence\n// (SQL tool results this turn + verified answers in the retrieved context + the user's own question).\nconst ctx = $('Build context').first().json;\nconst res = $input.first().json;\nconst out = res.output || {};\nconst steps = res.intermediateSteps || [];\nconst toText = x => typeof x === 'string' ? x : JSON.stringify(x);\nconst arabicDigits = s => String(s || '').replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 0x0660)).replace(/٫/g, '.').replace(/٬/g, ',');\n// A number glued to a letter on its left is an identifier (customer C000123), not a quantity; 10.83x is still a number.\nconst nums = s => (arabicDigits(s).replace(/(\\d),(?=\\d{3})/g, '$1').match(/(?<![A-Za-z0-9_.])\\d+(?:\\.\\d+)?/g) || []).map(Number);\nconst sqlSteps = steps.filter(s => s.action && s.action.tool === 'run_sql');\nconst evidence = nums(ctx.question + ' ' + ctx.context + ' ' + steps.map(s => toText(s.observation)).join(' '));\nconst isTrivial = n => Number.isInteger(n) && (n <= 31 || (n >= 1990 && n <= 2035));\nconst close = (a, e) => Math.abs(a - e) <= Math.max(Math.abs(e) * 0.006, 0.051);\nconst scales = [1, 100, 0.01, 1e-3, 1e-6, 1e-9];\nconst supported = a => evidence.some(e => scales.some(k => close(a, e * k)));\nconst claimed = [...new Set(nums((out.answer || '') + ' ' + (out.value || '')))].filter(n => !isTrivial(n));\nconst ungrounded = claimed.filter(n => !supported(n));\nconst inputOf = s => { const t = s.action.toolInput; return typeof t === 'string' ? t : (t && (t.sql || t.query)) || toText(t); };\nconst lastSql = sqlSteps.length ? inputOf(sqlSteps[sqlSteps.length - 1]) : '';\nconst grounded = ungrounded.length === 0;\nconst refused = out.status === 'refused';\nconst base = {\n  http_status: 200, kb_ids: ctx.kb_ids, retrieval: ctx.retrieval, tool_calls: steps.length,\n  tools_used: [...new Set(steps.map(s => s.action && s.action.tool).filter(Boolean))],\n  grounded, ungrounded_numbers: ungrounded.map(String), cached: false\n};\n// No SQL ran and the numbers are not in the evidence: the model is replaying memory or guessing. Never show it.\nif (!refused && !grounded && sqlSteps.length === 0) {\n  const ar = /[؀-ۿ]/.test(ctx.question);\n  return [{ json: { ...base,\n    status: 'error', evidence: 'none', sql: '',\n    answer: ar ? 'مقدرتش أتأكد من الأرقام دي من الداتا، فمش هعرضها. جرّب تسأل السؤال تاني بصيغة أوضح.' : 'I could not verify these numbers against the data, so I will not show them. Please rephrase the question and try again.',\n    error: 'blocked_ungrounded_no_sql: ' + String(out.answer || '').slice(0, 800)\n  } }];\n}\nreturn [{ json: { ...base,\n  status: refused ? 'refused' : 'answered',\n  answer: out.answer || '',\n  value: out.value || '', unit: out.unit || '', period: out.period || '', grain: out.grain || '',\n  source: out.source || '',\n  // Only SQL that really ran is reported: the model cannot claim a query it did not execute.\n  sql: lastSql, why: out.why || '',\n  evidence: refused ? 'trust_rule' : (sqlSteps.length ? 'live_sql' : (claimed.length ? 'kb_only' : 'none')),\n  warning: grounded ? '' : 'Some numbers could not be traced to a query result. Please verify before using them.'\n} }];"
+      },
+      "id": "be540d6c-8a03-4df3-97f9-7c27a4088707",
+      "name": "Grounding check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseCode": "={{ $json.http_status }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "id": "295385e7-4b64-4747-8289-067b93e4efeb",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2512,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: $('Finalize response').first().json.log }];"
+      },
+      "id": "962c3f53-c788-463a-8896-a61472431740",
+      "name": "Log row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "tableId": "assistant_log",
+        "dataToSend": "autoMapInputData"
+      },
+      "id": "3e55e1e7-05cf-4975-a49e-7b70fbdc197b",
+      "name": "Write assistant_log (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2944,
+        400
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 1 · Intake\nValidate length + sanitize sessionId. Invalid input gets a 400 and costs zero tokens.",
+        "color": 7
+      },
+      "id": "1ce1c02f-afe0-42dc-9991-e0dec2a0698c",
+      "name": "Sticky Note 1828f51e",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        128,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "model": "google/gemini-2.5-flash",
+        "options": {
+          "temperature": 0,
+          "timeout": 25000,
+          "maxRetries": 1
+        }
+      },
+      "id": "5041bbbd-5550-476b-95bc-cffc394bb71e",
+      "name": "Fallback model (Gemini)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1568,
+        880
+      ],
+      "credentials": {
+        "openRouterApi": {
+          "id": "VpUansl3XxDGcyJI",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        0
+      ],
+      "id": "23e73256-6b14-4a1d-b384-af1c9127bab0",
+      "name": "Telegram Trigger",
+      "webhookId": "069de0c6-bc8d-46cd-98dd-28e692123293",
+      "credentials": {
+        "telegramApi": {
+          "id": "30Gmu1xOSbfxIDAC",
+          "name": "Cottonil_project"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Ask (POST)": {
+      "main": [
+        [
+          {
+            "node": "Validate request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate request": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Cache lookup (24h)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rejected reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache lookup (24h)": {
+      "main": [
+        [
+          {
+            "node": "Cache hit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache hit?": {
+      "main": [
+        [
+          {
+            "node": "Cached reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Embed question (OpenRouter)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cached reply": {
+      "main": [
+        [
+          {
+            "node": "Finalize response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize response": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed question (OpenRouter)": {
+      "main": [
+        [
+          {
+            "node": "Hybrid search (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hybrid search (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Build context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build context": {
+      "main": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cottonil data agent": {
+      "main": [
+        [
+          {
+            "node": "Grounding check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Agent failed reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session memory (last 4 turns)": {
+      "ai_memory": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_schema": {
+      "ai_tool": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "run_sql": {
+      "ai_tool": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_kb": {
+      "ai_tool": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer schema": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent failed reply": {
+      "main": [
+        [
+          {
+            "node": "Finalize response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rejected reply": {
+      "main": [
+        [
+          {
+            "node": "Finalize response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Grounding check": {
+      "main": [
+        [
+          {
+            "node": "Finalize response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond": {
+      "main": [
+        [
+          {
+            "node": "Log row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log row": {
+      "main": [
+        [
+          {
+            "node": "Write assistant_log (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback model (Gemini)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Cottonil data agent",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {
+    "description": "Production RAG assistant for the Cottonil dashboard: validate, cache, hybrid retrieval, OpenRouter agent with read-only Supabase SQL tools, grounding check, and logging."
+  }
+}

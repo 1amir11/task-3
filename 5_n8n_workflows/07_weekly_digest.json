@@ -1,0 +1,431 @@
+{
+  "name": "Cottonil - Weekly digest (Monday)",
+  "nodes": [
+    {
+      "id": "77c671c5-e7d0-43b9-9095-6df6b7b58931",
+      "name": "Run now (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cottonil-digest",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "webhookId": "557a71e6-ad6c-4d6d-a972-f82b6c52421f"
+    },
+    {
+      "id": "01638fb0-aa96-4004-9593-9de292150025",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The only place to configure this workflow.\nconst TELEGRAM_CHAT_ID = '';  // put your Telegram chat ID here   // management group chat ID. Empty = log only, no message.\nconst j = $input.first().json;\nconst fromWebhook = !!j.headers;\nconst body = j.body || {};\nconst asked = body.source || '';\nconst weekEnd = /^\\d{4}-\\d{2}-\\d{2}$/.test(String(body.week_end || '')) ? body.week_end : null;\nreturn [{ json: {\n  source: fromWebhook ? (['dashboard', 'manual'].includes(asked) ? asked : 'api') : 'schedule',\n  from_webhook: fromWebhook,\n  chat_id: String(TELEGRAM_CHAT_ID).trim(),\n  week_end: fromWebhook ? weekEnd : null\n} }];"
+      }
+    },
+    {
+      "id": "4031210a-f61b-48a9-8c97-95a6c72f10c8",
+      "name": "Get week numbers (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/weekly_digest",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_week_end: $json.week_end }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "211a88fd-4544-4c9a-8f0b-b4a2a644aa75",
+      "name": "Build digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Every value comes from weekly_digest(); this node only formats them and computes the deltas.\nconst d = $input.first().json;\nconst cfg = $('Config').first().json;\nconst k = d.kpis || {};\nconst t = k.this_week || {}, p = k.prev_week || {}, y = k.last_year || {};\nconst nf = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });\nconst pct = (a, b) => (b ? ((a - b) / b * 100) : null);\nconst sgn = v => v === null ? 'n/a' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%';\nconst pp = (a, b) => (b === undefined || b === null) ? 'n/a' : ((a - b) >= 0 ? '+' : '') + (a - b).toFixed(2) + ' pp';\nconst g = d.guardrail || {}, r = d.reactivation_last_run || null, a = d.assistant_7d || {};\nconst line = (label, val, unit, cur, prev, ly) => label + ': ' + val + unit + '  (أسبوع: ' + sgn(pct(cur, prev)) + ' | سنة: ' + sgn(pct(cur, ly)) + ')';\nconst text = '📊 ملخص أسبوع كوتونيل — ' + d.week.from + ' → ' + d.week.to + '\\n\\n'\n  + line('المبيعات الصافية', nf(t.net_egp), ' جنيه', t.net_egp, p.net_egp, y.net_egp) + '\\n'\n  + line('الأوردرات', nf(t.orders), '', t.orders, p.orders, y.orders) + '\\n'\n  + line('متوسط الأوردر', nf(t.aov_egp), ' جنيه', t.aov_egp, p.aov_egp, y.aov_egp) + '\\n'\n  + line('المشترين', nf(t.buyers), '', t.buyers, p.buyers, y.buyers) + '\\n'\n  + 'هامش الربح: ' + t.gm_pct + '%  (أسبوع: ' + pp(t.gm_pct, p.gm_pct) + ' | سنة: ' + pp(t.gm_pct, y.gm_pct) + ')\\n'\n  + 'نسبة الخصم: ' + t.discount_pct + '%  (أسبوع: ' + pp(t.discount_pct, p.discount_pct) + ' | سنة: ' + pp(t.discount_pct, y.discount_pct) + ')\\n\\n'\n  + '🚨 الخصومات: ' + nf(g.lines_above_15pct) + ' سطر بخصم أكتر من 15%، ' + nf(g.excess_egp) + ' جنيه خصم فوق سقف 10%.\\n'\n  + (r ? '🔁 حملة الاسترجاع (#' + r.run_id + '): ' + r.status + ' — ' + nf(r.treatment) + ' عميل + ' + nf(r.holdout) + ' holdout.\\n' : '🔁 حملة الاسترجاع: مفيش run لسه.\\n')\n  + '🤖 المساعد (7 أيام): ' + nf(a.questions) + ' سؤال، ' + nf(a.answered) + ' اتجاوب، ' + nf(a.refused) + ' اترفض (خصوصية/خارج النطاق)، ' + nf(a.errors) + ' error، grounded ' + (a.grounded_pct ?? 'n/a') + '%.\\n\\n'\n  + 'ملحوظة: الداتا synthetic للتدريب، مش أرقام مراجَعة.';\nconst summary = 'Week ' + d.week.from + '..' + d.week.to + ': net ' + nf(t.net_egp) + ' EGP (' + sgn(pct(t.net_egp, p.net_egp)) + ' WoW, '\n  + sgn(pct(t.net_egp, y.net_egp)) + ' YoY), ' + nf(t.orders) + ' orders, GM ' + t.gm_pct + '%. Discounts: ' + nf(g.lines_above_15pct)\n  + ' lines above 15%, ' + nf(g.excess_egp) + ' EGP above a 10% cap. Assistant: ' + nf(a.questions) + ' questions, grounded ' + (a.grounded_pct ?? 'n/a') + '%.';\nreturn [{ json: {\n  summary, text,\n  send_telegram: cfg.chat_id !== '',\n  log_row: { workflow: 'digest', source: cfg.source, status: 'ok', data_day: d.week.to, summary, payload: d },\n  response: { status: 'ok', summary, text, week: d.week, telegram: cfg.chat_id !== '' }\n} }];"
+      }
+    },
+    {
+      "id": "d2944133-d744-4624-a57a-659df310883a",
+      "name": "Log run (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/automation_runs",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.log_row) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "131ce4c5-c893-42c5-a899-eecb52d89767",
+      "name": "Called by webhook?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $(\"Config\").first().json.from_webhook }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "894ffbee-3720-4350-896a-61e6c4a46517",
+      "name": "Reply",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1440,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('Build digest').first().json.response) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "5531818f-023b-4438-9c31-dcf3dd9aae8b",
+      "name": "Telegram set up?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Build digest').first().json.send_telegram }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b7621bec-68d9-499d-8305-8afdd8cd1d72",
+      "name": "Send digest to management",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        300
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $(\"Config\").first().json.chat_id }}",
+        "text": "={{ $('Build digest').first().json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "webhookId": "dc36d852-b1eb-477d-ab3f-7fc6111920fa",
+      "credentials": {
+        "telegramApi": {
+          "id": "30Gmu1xOSbfxIDAC",
+          "name": "Cottonil_project"
+        }
+      }
+    },
+    {
+      "id": "66f9a3b4-f30f-48c5-bb5a-1fd8dff82e8c",
+      "name": "No chat ID: logged only",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        500
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "ee25cabe-bcb6-432f-8eab-023aed05e7de",
+      "name": "Monday 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        500
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "2a3f20c8-504e-4480-a621-4673a315aa18",
+      "name": "Sticky Note 322a951d",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ],
+      "parameters": {
+        "content": "## 1 · Week numbers (Supabase)\nMonday 08:00 (Cairo). weekly_digest() returns last week vs the week before vs the same week last year, plus the guardrail, reactivation and assistant health. No LLM: zero tokens.",
+        "color": 7
+      }
+    },
+    {
+      "id": "412ff16a-6c9f-49b2-a999-9eb0267e26bd",
+      "name": "Sticky Note 2f151642",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        560
+      ],
+      "parameters": {
+        "content": "## 2 · Log + send\nStored in automation_runs; sent to the management Telegram chat when a chat ID is set.",
+        "color": 4
+      }
+    }
+  ],
+  "connections": {
+    "Run now (POST)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Get week numbers (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get week numbers (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Build digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build digest": {
+      "main": [
+        [
+          {
+            "node": "Log run (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log run (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Called by webhook?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Called by webhook?": {
+      "main": [
+        [
+          {
+            "node": "Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram set up?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply": {
+      "main": [
+        [
+          {
+            "node": "Telegram set up?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram set up?": {
+      "main": [
+        [
+          {
+            "node": "Send digest to management",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No chat ID: logged only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monday 08:00": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {
+    "description": "Monday 08:00 management digest: last week vs prior week vs same week last year, discount-cap leakage, reactivation status and assistant health; logged and sent to Telegram. No LLM."
+  }
+}

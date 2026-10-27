@@ -1,0 +1,449 @@
+{
+  "name": "Cottonil - Assistant evaluation (golden set)",
+  "nodes": [
+    {
+      "id": "e2cdc863-0707-4335-b6cb-425be2fc511c",
+      "name": "Run eval now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "dfe96c5b-7f1c-4a37-96bc-47528f5b6234",
+      "name": "Load golden set (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        260,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "getAll",
+        "tableId": "assistant_eval_set",
+        "returnAll": true,
+        "orderBy": "id",
+        "filterType": "none"
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "edc84afa-48fe-4da7-a9af-d7f1707c1799",
+      "name": "Tag run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// One run_id per eval run; one session per question so memory never leaks between test cases.\nconst runId = 'eval-' + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '') + '-' + $execution.id;\nreturn $input.all().map(i => ({ json: { ...i.json, run_id: runId, session_id: runId + '-q' + i.json.id } }));"
+      }
+    },
+    {
+      "id": "51041a9e-f1d2-4b2f-bb8e-b65ae35c35cb",
+      "name": "Ask the assistant (live webhook)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        740,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR-N8N-HOST/webhook/cottonil-assistant",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "ngrok-skip-browser-warning",
+              "value": "1"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chatInput: $json.question, sessionId: $json.session_id, channel: \"eval\" }) }}",
+        "options": {
+          "timeout": 90000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 300
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "0a071367-0766-485f-bd6c-86209716109a",
+      "name": "Score answers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Deterministic grading, no LLM-as-judge: status must match, and every expected number must appear in the answer.\nconst cases = $('Tag run').all().map(i => i.json);\nconst nums = s => (String(s || '').replace(/[\\u0660-\\u0669]/g, d => String(d.charCodeAt(0) - 0x0660))\n  .replace(/(\\d),(?=\\d{3})/g, '$1').match(/\\d+(?:\\.\\d+)?/g) || []).map(Number);\nconst scales = [1, 100, 0.01, 1e-3, 1e-6];\n// 234,138,548 matches \"234,138,548\" or \"234.1 million\"; 0.3089 matches \"30.89%\".\nconst close = (a, e) => Math.abs(a - e) <= Math.max(Math.abs(e) * 0.006, 0.051);\nconst found = (expected, have) => have.some(h => scales.some(k => close(h, expected * k)));\nreturn $input.all().map((item, i) => {\n  const c = cases[i];\n  const r = item.json || {};\n  const actual = r.status || 'error';\n  const have = nums((r.answer || '') + ' ' + (r.value || ''));\n  const expectedNums = (c.expected_numbers || []).map(Number);\n  const missing = c.expected_status === 'answered' ? expectedNums.filter(e => !found(e, have)) : [];\n  const status_ok = actual === c.expected_status;\n  const numbers_ok = c.expected_status === 'answered' ? missing.length === 0 : null;\n  const grounded = r.grounded === false ? false : true;\n  return { json: {\n    run_id: c.run_id, eval_id: c.id, question: c.question,\n    expected_status: c.expected_status, actual_status: actual,\n    status_ok, numbers_ok, missing_numbers: missing, grounded,\n    passed: status_ok && (numbers_ok !== false) && grounded,\n    latency_ms: r.latency_ms || null,\n    answer: (r.answer || JSON.stringify(r).slice(0, 300)).slice(0, 1000)\n  } };\n});"
+      }
+    },
+    {
+      "id": "3eb8c4e4-1a3f-40a9-89c6-5b78b2cd59cb",
+      "name": "Save results (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1220,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "assistant_eval_results",
+        "dataToSend": "autoMapInputData"
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "c3eaf3d0-e9e2-4146-b4e9-1d4abce52dee",
+      "name": "Run summary (Supabase view)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1460,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "getAll",
+        "tableId": "assistant_eval_summary",
+        "returnAll": false,
+        "limit": 1,
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "condition": "eq",
+              "keyValue": "={{ $(\"Tag run\").first().json.run_id }}"
+            }
+          ]
+        }
+      },
+      "executeOnce": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "8e9cc4c0-def5-4239-a831-b3912ff7b928",
+      "name": "Eval report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const s = $input.first().json;\nconst failures = $('Score answers').all().map(i => i.json).filter(r => !r.passed)\n  .map(r => ({ id: r.eval_id, question: r.question, expected: r.expected_status, got: r.actual_status, missing: r.missing_numbers, grounded: r.grounded }));\nreturn [{ json: { ...s, threshold_pct: 90, gate_passed: Number(s.pass_pct) >= 90, failures } }];"
+      }
+    },
+    {
+      "id": "03bc4ba1-37d0-48e5-bed2-696bf317c0e7",
+      "name": "Quality gate >= 90%?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1940,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.gate_passed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "90f08481-abfa-4165-97a9-2ae993aa56f6",
+      "name": "Gate passed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2180,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "538e73c8-aec1-49a6-b703-8e19b4eca9c2",
+      "name": "Fail run (alerts error workflow)",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2180,
+        420
+      ],
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "=Assistant quality gate failed: {{ $json.pass_pct }}% passed (< 90%). Failures: {{ JSON.stringify($json.failures) }}"
+      }
+    },
+    {
+      "id": "dc860091-1358-4e67-992b-c1e68da46996",
+      "name": "Every Sunday 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                0
+              ],
+              "triggerAtHour": 7,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "f9c18e6d-32d9-45c9-9001-a8a065e32033",
+      "name": "Sticky Note 7108b35a",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ],
+      "parameters": {
+        "content": "## Golden set\n19 questions from the verified KB answers + the refusal rules (12 must be answered with exact numbers, 7 must be refused). Stored in public.assistant_eval_set.",
+        "color": 7
+      }
+    },
+    {
+      "id": "341dcbb7-e0dd-4129-8275-f0a91215a3ad",
+      "name": "Sticky Note efedb301",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        560
+      ],
+      "parameters": {
+        "content": "## End-to-end test\nCalls the LIVE assistant webhook (channel = eval, cache bypassed, one session per question) exactly like the dashboard does.",
+        "color": 4
+      }
+    },
+    {
+      "id": "4ceee95d-26d0-4bc4-b961-906572fe6d55",
+      "name": "Sticky Note 2f743a97",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        816
+      ],
+      "parameters": {
+        "content": "## Deterministic grading\nNo LLM-as-judge: status must match AND every expected number must appear in the answer (0.6% tolerance) AND grounded must not be false.",
+        "color": 6
+      }
+    },
+    {
+      "id": "dfc8576c-e47d-4c19-b36a-a93eaf2da123",
+      "name": "Sticky Note 3295bda2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        1072
+      ],
+      "parameters": {
+        "content": "## Quality gate\nResults in public.assistant_eval_results; KPIs in view assistant_eval_summary. Below 90% the run fails so the error workflow logs it: a prompt or model change cannot silently break answers.",
+        "color": 3
+      }
+    }
+  ],
+  "connections": {
+    "Run eval now": {
+      "main": [
+        [
+          {
+            "node": "Load golden set (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load golden set (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Tag run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag run": {
+      "main": [
+        [
+          {
+            "node": "Ask the assistant (live webhook)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask the assistant (live webhook)": {
+      "main": [
+        [
+          {
+            "node": "Score answers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score answers": {
+      "main": [
+        [
+          {
+            "node": "Save results (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save results (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Run summary (Supabase view)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run summary (Supabase view)": {
+      "main": [
+        [
+          {
+            "node": "Eval report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eval report": {
+      "main": [
+        [
+          {
+            "node": "Quality gate >= 90%?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality gate >= 90%?": {
+      "main": [
+        [
+          {
+            "node": "Gate passed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail run (alerts error workflow)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Sunday 07:00": {
+      "main": [
+        [
+          {
+            "node": "Load golden set (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {
+    "description": "Weekly end-to-end evaluation: asks the live assistant 19 golden questions, grades numbers and refusals deterministically, stores results in Supabase, fails below 90%."
+  }
+}

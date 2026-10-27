@@ -1,0 +1,401 @@
+{
+  "name": "Cottonil - KB ingestion (embeddings)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "7cefac50-4cc4-467d-ac14-3c76aebb0d13",
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/kb_pending",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "cc582ee3-2a88-4d1b-957b-94964a3bef67",
+      "name": "Fetch new or changed chunks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        272,
+        304
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Incremental ingestion: only chunks with no embedding or whose content hash changed come in.\n// Batching 16 texts per call = 3 API calls for 46 chunks instead of 46.\nconst chunks = $input.all().map(i => i.json).filter(c => c && c.id != null && c.text);\nconst SIZE = 16;\nconst batches = [];\nfor (let i = 0; i < chunks.length; i += SIZE) {\n  const part = chunks.slice(i, i + SIZE);\n  batches.push({ json: {\n    batch_no: batches.length + 1,\n    ids: part.map(c => c.id),\n    hashes: part.map(c => c.content_hash),\n    texts: part.map(c => c.text.slice(0, 8000))\n  } });\n}\nif (!batches.length) return [{ json: { nothing_to_do: true, pending: 0 } }];\nreturn batches.map(b => ({ json: { ...b.json, nothing_to_do: false, pending: chunks.length } }));"
+      },
+      "id": "dc9674a9-baa3-48e5-9a1f-db0c03f05759",
+      "name": "Plan batches of 16",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.nothing_to_do }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4a9fa7bb-e8fc-4b4e-92fc-3010146a75d0",
+      "name": "Anything to embed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        768,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"openai/text-embedding-3-small\", input: $json.texts }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 500
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "e02584b9-6133-4020-9212-bc73af991e42",
+      "name": "Embed batch (OpenRouter)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1008,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "openRouterApi": {
+          "id": "VpUansl3XxDGcyJI",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Quality gate: never write a broken vector. Wrong count or wrong dimension = fail the run loudly.\nconst DIMS = 1536;\nconst batches = $('Plan batches of 16').all();\nconst out = [];\n$input.all().forEach((item, b) => {\n  const plan = batches[b].json;\n  const data = (item.json.data || []).slice().sort((x, y) => x.index - y.index);\n  if (data.length !== plan.ids.length) {\n    throw new Error('Batch ' + plan.batch_no + ': sent ' + plan.ids.length + ' texts, got ' + data.length + ' vectors. ' + JSON.stringify(item.json.error || '').slice(0, 300));\n  }\n  data.forEach((d, i) => {\n    if (!Array.isArray(d.embedding) || d.embedding.length !== DIMS) {\n      throw new Error('Chunk ' + plan.ids[i] + ': expected ' + DIMS + ' dims, got ' + (d.embedding || []).length);\n    }\n    out.push({ json: {\n      p_id: plan.ids[i],\n      p_embedding: '[' + d.embedding.join(',') + ']',\n      p_model: item.json.model || 'openai/text-embedding-3-small',\n      p_hash: plan.hashes[i]\n    } });\n  });\n});\nreturn out;"
+      },
+      "id": "046e60aa-3510-42f0-abec-156f66a8d443",
+      "name": "Validate vectors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/kb_set_embedding",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 10,
+              "batchInterval": 200
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "67953935-a454-4809-9819-3496d6e67294",
+      "name": "Save embedding (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1488,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/kb_coverage",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {}
+      },
+      "id": "804dcdea-c7d6-4be1-8a61-a43b36cdc79f",
+      "name": "Check coverage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1728,
+        320
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $input.first().json;\nlet saved = 0, failed = [];\ntry {\n  $('Save embedding (Supabase)').all().forEach(i => i.json.ok ? saved++ : failed.push(i.json.id));\n} catch (e) { /* branch did not run: nothing was pending */ }\nconst report = {\n  kb_total: c.total, kb_embedded: c.embedded, kb_missing: c.missing, kb_stale: c.stale,\n  coverage_pct: c.total ? Math.round(1000 * c.embedded / c.total) / 10 : 0,\n  saved_this_run: saved, failed_ids: failed, models: c.models,\n  healthy: c.missing === 0 && c.stale === 0 && failed.length === 0\n};\nif (!report.healthy) throw new Error('KB not fully embedded: ' + JSON.stringify(report));\nreturn [{ json: report }];"
+      },
+      "id": "154aa55b-8acf-4e52-9209-c29d75127b3a",
+      "name": "Run report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1968,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "id": "d290ca03-e4df-4e56-9095-5d061e72d1e4",
+      "name": "Every night 03:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1 · Load\nOnly NEW or CHANGED chunks (content hash != embedded hash).\nRuns nightly + on demand, so editing the KB is enough to refresh it.",
+        "color": 7
+      },
+      "id": "202adba8-b14b-4a94-87bf-63d80e029fce",
+      "name": "Sticky Note e3996298",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        112,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2 · Embed\nOpenRouter `openai/text-embedding-3-small` (1536 dims), 16 texts per call, retry x3.\nQuality gate: wrong count or dimension fails the run, so a broken vector is never written.",
+        "height": 256,
+        "width": 480,
+        "color": 4
+      },
+      "id": "a10b7e60-ce2f-4b50-ab86-284e5fb9c113",
+      "name": "Sticky Note d42bf6fc",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        112,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3 · Store + verify\nWrites vector + model + hash through the Supabase API (RPC kb_set_embedding).\nCoverage must be 100%, or the run fails and the error workflow logs it.",
+        "height": 256,
+        "width": 448,
+        "color": 6
+      },
+      "id": "38d2a3e3-9702-42cf-ba9f-48e7f6ab45ec",
+      "name": "Sticky Note 41b13023",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        608,
+        560
+      ]
+    }
+  ],
+  "connections": {
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "Fetch new or changed chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch new or changed chunks": {
+      "main": [
+        [
+          {
+            "node": "Plan batches of 16",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan batches of 16": {
+      "main": [
+        [
+          {
+            "node": "Anything to embed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything to embed?": {
+      "main": [
+        [
+          {
+            "node": "Embed batch (OpenRouter)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check coverage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed batch (OpenRouter)": {
+      "main": [
+        [
+          {
+            "node": "Validate vectors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate vectors": {
+      "main": [
+        [
+          {
+            "node": "Save embedding (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save embedding (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Check coverage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check coverage": {
+      "main": [
+        [
+          {
+            "node": "Run report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every night 03:00": {
+      "main": [
+        [
+          {
+            "node": "Fetch new or changed chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {
+    "description": "Incremental KB ingestion: embeds new/changed Cottonil KB chunks with OpenRouter, saves them via Supabase RPC, and fails loudly unless coverage is 100%."
+  }
+}

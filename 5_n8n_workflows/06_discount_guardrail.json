@@ -1,0 +1,428 @@
+{
+  "name": "Cottonil - Discount guardrail (daily)",
+  "nodes": [
+    {
+      "id": "14936444-e019-4b36-a123-e7106a4a7de9",
+      "name": "Run now (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cottonil-guardrail",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "webhookId": "e60722d9-f92a-489f-83e3-e46c08a04e96"
+    },
+    {
+      "id": "2719dd99-deda-4984-bec9-01ab2dda3704",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The only place to configure this workflow.\nconst TELEGRAM_CHAT_ID = '';  // put your Telegram chat ID here   // commercial director's Telegram chat ID. Empty = log only, no message.\nconst j = $input.first().json;\nconst fromWebhook = !!j.headers;\nconst body = j.body || {};\nconst asked = body.source || '';\n// replay_day lets the dashboard replay a past day of the synthetic data; anything that is not YYYY-MM-DD is ignored.\nconst day = /^\\d{4}-\\d{2}-\\d{2}$/.test(String(body.replay_day || '')) ? body.replay_day : null;\nreturn [{ json: {\n  source: fromWebhook ? (['dashboard', 'manual'].includes(asked) ? asked : 'api') : 'schedule',\n  from_webhook: fromWebhook,\n  chat_id: String(TELEGRAM_CHAT_ID).trim(),\n  replay_day: fromWebhook ? day : null\n} }];"
+      }
+    },
+    {
+      "id": "825119dc-5c25-46ec-aeab-0955331a86d5",
+      "name": "Check the day (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/rpc/discount_guardrail",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_day: $json.replay_day }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "2e9a6da1-055e-472a-85cd-65d372dc60d6",
+      "name": "Build alert + reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Every number below comes straight from discount_guardrail(); this node only formats them.\n// Definition (same as the dashboard): lines discounted above 15%; EGP = the part of their discount above a 10% cap.\nconst g = $input.first().json;\nconst cfg = $('Config').first().json;\nif (g.ok === false) {\n  const summary = 'Guardrail did not run: ' + g.error + '.';\n  return [{ json: { status: 'error', summary, text: summary, send_telegram: false,\n    log_row: { workflow: 'guardrail', source: cfg.source, status: 'error', data_day: null, summary, payload: g },\n    response: { status: 'error', summary } } }];\n}\nconst nf = n => Number(n || 0).toLocaleString('en-US');\nconst ch = (g.by_channel || [])[0];\nconst cat = (g.by_category || [])[0];\nconst top = (g.top_lines || [])[0];\nconst isAlert = g.status === 'alert';\nlet summary;\nif (!g.lines) {\n  summary = g.day + ': no invoice line discounted above 15%. Status: normal.';\n} else {\n  summary = g.day + ': ' + nf(g.lines) + ' invoice lines discounted above 15%, ' + nf(g.excess_egp) + ' EGP given above a 10% cap ('\n    + g.vs_baseline + 'x the 28-day median of ' + nf(g.baseline_median_excess_egp) + ' EGP). Biggest channel: '\n    + (ch ? ch.channel + ' ' + nf(ch.excess_egp) + ' EGP' : 'n/a') + '. Status: ' + (isAlert ? 'ALERT' : 'normal')\n    + '. Last 12 months: ' + nf(g.l12m_lines) + ' lines, ' + nf(g.l12m_excess_egp) + ' EGP.';\n}\nconst action = !isAlert ? 'مفيش حاجة مطلوبة، اليوم في المعدل الطبيعي.'\n  : (ch && /Wholesale/i.test(ch.channel)\n    ? 'راجع موافقات خصم الجملة النهارده، وخلي أي خصم فوق 15% يحتاج موافقة مدير المبيعات.'\n    : 'راجع مع مديري الفروع/الأونلاين الخصومات اليدوية النهارده في ' + (ch ? ch.channel : 'القناة دي') + '.');\nconst text = (isAlert ? '⚠️ تنبيه خصومات' : '✅ تقرير الخصومات') + ' — ' + g.day + '\\n\\n'\n  + nf(g.lines) + ' سطر فاتورة بخصم أكتر من 15%.\\n'\n  + 'الخصم اللي اتدى فوق سقف 10%: ' + nf(g.excess_egp) + ' جنيه (' + g.vs_baseline + '× متوسط آخر 28 يوم).\\n'\n  + (ch ? 'أكتر قناة: ' + ch.channel + ' (' + nf(ch.excess_egp) + ' جنيه، ' + ch.lines + ' سطر)\\n' : '')\n  + (cat ? 'أكتر قسم: ' + cat.category + ' (' + nf(cat.excess_egp) + ' جنيه)\\n' : '')\n  + (top ? 'أكبر سطر: ' + top.sales_line_id + ' — ' + top.channel + '، ' + top.category + '، خصم ' + top.discount_pct + '%\\n' : '')\n  + '\\nالمطلوب: ' + action;\nconst status = isAlert ? 'alert' : 'ok';\nreturn [{ json: {\n  status, summary, text,\n  send_telegram: cfg.chat_id !== '' && (isAlert || cfg.source === 'dashboard'),\n  log_row: { workflow: 'guardrail', source: cfg.source, status, data_day: g.day, summary, payload: g },\n  response: { status, summary, day: g.day, lines: g.lines, excess_egp: g.excess_egp, vs_baseline: g.vs_baseline,\n              by_channel: g.by_channel, top_lines: g.top_lines, telegram: cfg.chat_id !== '' }\n} }];"
+      }
+    },
+    {
+      "id": "fae9983a-b392-44e6-9671-cd8453a236f6",
+      "name": "Log run (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://ebnoaswhrmhlmxvmfsxl.supabase.co/rest/v1/automation_runs",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.log_row) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "supabaseApi": {
+          "id": "ewxz5r0M7n7dsfgZ",
+          "name": "Cottonil"
+        }
+      }
+    },
+    {
+      "id": "0e5734d9-7325-4e56-885f-dc5f0a93e236",
+      "name": "Called from dashboard?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $(\"Config\").first().json.from_webhook }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "cd4249b2-acc5-4152-a4e7-375dc4d90a9b",
+      "name": "Reply to dashboard",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1440,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('Build alert + reply').first().json.response) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "5f4461a5-0060-497b-9c71-719fa2071cff",
+      "name": "Send to Telegram?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Build alert + reply').first().json.send_telegram }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "44cc3366-067d-4d91-81f5-958d8a1ce9c6",
+      "name": "Alert commercial director",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        300
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $(\"Config\").first().json.chat_id }}",
+        "text": "={{ $('Build alert + reply').first().json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "webhookId": "6b37927c-7ee0-484f-a528-63d16d17fb04",
+      "credentials": {
+        "telegramApi": {
+          "id": "30Gmu1xOSbfxIDAC",
+          "name": "Cottonil_project"
+        }
+      }
+    },
+    {
+      "id": "c1d41a48-8602-40e5-90a0-fb3eca2a0cd6",
+      "name": "Normal day or no chat ID",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        500
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "0ade4950-b7c2-4dd1-b180-0f0c4e6aa30e",
+      "name": "Every day 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        500
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "e9bb3960-f723-42f8-9e08-93a422b40d4f",
+      "name": "Sticky Note 842158f6",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ],
+      "parameters": {
+        "content": "## 1 · Check (Supabase)\nDaily 08:00, or Run now from the dashboard with replay_day. discount_guardrail() counts invoice lines above the 15% cap and compares the excess with the median of the previous 28 days. Alert = above 1.5x the median.",
+        "color": 7
+      }
+    },
+    {
+      "id": "099c69c3-4d2c-4c29-babc-8bb975b0ff14",
+      "name": "Sticky Note ebe42f4b",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        560
+      ],
+      "parameters": {
+        "content": "## 2 · Log + notify\nEvery run is stored in automation_runs (the weekly digest reads it). Telegram goes out only on an ALERT day, or when the dashboard asks, and only when a chat ID is set.",
+        "color": 4
+      }
+    }
+  ],
+  "connections": {
+    "Run now (POST)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Check the day (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check the day (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Build alert + reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build alert + reply": {
+      "main": [
+        [
+          {
+            "node": "Log run (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log run (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Called from dashboard?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Called from dashboard?": {
+      "main": [
+        [
+          {
+            "node": "Reply to dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send to Telegram?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply to dashboard": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Telegram?": {
+      "main": [
+        [
+          {
+            "node": "Alert commercial director",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normal day or no chat ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every day 08:00": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "meta": {
+    "description": "Daily (and on-demand) check of invoice lines sold above the 15% discount cap vs the 28-day median; logs every run and alerts the commercial director in Telegram on alert days."
+  }
+}
