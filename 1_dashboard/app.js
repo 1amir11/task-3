@@ -35,6 +35,11 @@ function showTip(x, y, title, rows){
   tip.style.left = left + "px"; tip.style.top = top + "px";
 }
 const hideTip = () => { tip.hidden = true; };
+// pointerleave is skipped when the mouse exits the window fast or the tab loses focus, so hide on anything outside a [data-tip] owner
+addEventListener("pointermove", e => { if (!tip.hidden && !e.target.closest?.("[data-tip]")) hideTip(); }, {passive:true});
+document.documentElement.addEventListener("pointerleave", hideTip);
+addEventListener("blur", hideTip);
+addEventListener("pointerdown", e => { if (!e.target.closest?.("[data-tip]")) hideTip(); });
 
 /* ---------- table helper ---------- */
 function table(target, head, rows, rightCols=[]){
@@ -90,7 +95,7 @@ function lineChart(id, {labels, series, yFmt, height=260, yMin, endLabels=true, 
       S("circle", {cx:x(0), cy:y(s.values[0]), r:4, fill:s.color, stroke:css("--surface"), "stroke-width":2}, svg); });
   }
   const cross = S("line", {class:"hair", y1:m.t, y2:H-m.b, x1:m.l, x2:m.l, visibility:"hidden"}, svg);
-  const hit = S("rect", {x:m.l-10, y:0, width:W-m.l-m.r+20, height:H, fill:"transparent"}, svg);
+  const hit = S("rect", {x:m.l-10, y:0, width:W-m.l-m.r+20, height:H, fill:"transparent", "data-tip":""}, svg);
   const move = ev => {
     const r = svg.getBoundingClientRect(), px = (ev.clientX - r.left) * W / r.width;
     const i = Math.max(0, Math.min(labels.length-1, Math.round((px - m.l) / ((W - m.l - m.r) / Math.max(1, labels.length - 1)))));
@@ -121,7 +126,7 @@ function columns(id, {items, yFmt, height=220, ref, color, labelAll=false}){
     S("path", {d:p, fill}, svg);
     const t = S("text", {x:cx, y:H-6, "text-anchor":"middle"}, ax); t.textContent = d.label;
     if (labelAll || d.hl){ const v = S("text", {x:cx, y:top-6, "text-anchor":"middle", class:"lbl-ink"}, svg); v.textContent = yFmt(d.value, true); }
-    const hit = S("rect", {x:m.l + bw*i, y:m.t, width:bw, height:H-m.t-m.b, fill:"transparent"}, svg);
+    const hit = S("rect", {x:m.l + bw*i, y:m.t, width:bw, height:H-m.t-m.b, fill:"transparent", "data-tip":""}, svg);
     hit.addEventListener("pointermove", ev => showTip(ev.clientX, ev.clientY, d.tipTitle || d.label, [{color:fill, value:yFmt(d.value, true), label:d.tipLabel || ""}]));
     hit.addEventListener("pointerleave", hideTip);
   });
@@ -132,7 +137,7 @@ function hbars(id, items, fmt){
   const host = document.getElementById(id); host.replaceChildren();
   const max = Math.max(...items.map(d => d.total || d.value));
   items.forEach(d => {
-    const row = el("div", "hb" + (d.hl ? " hl" : ""));
+    const row = el("div", "hb" + (d.hl ? " hl" : "")); row.dataset.tip = "";
     row.appendChild(el("div", "t", d.label));
     const tr = el("div", "track");
     if (d.total){ const q = el("div", "fill tot"); q.style.width = (100*d.total/max) + "%"; tr.appendChild(q); }
