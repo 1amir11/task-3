@@ -1,9 +1,11 @@
 -- Day 2: knowledge-base content for the assistant's RAG (loaded into cottonil.kb_chunks).
 -- Every SQL example was run against the analytics views on 2026-10-23; metadata.verified_answer = the result.
--- Embeddings are added later by an n8n workflow (OpenAI text-embedding-3-small). Rerunnable: it deletes and reinserts.
-delete from cottonil.kb_chunks;
+-- Embeddings are added later by an n8n workflow (OpenAI text-embedding-3-small).
+-- Rerunnable (upsert on title): ids stay fixed, so assistant_eval_set.kb_id keeps pointing at the right chunk.
+-- Only an edited chunk gets a new content_hash, so the nightly KB ingestion re-embeds just that one. A title dropped from this list is deleted.
+create unique index if not exists kb_chunks_title_key on cottonil.kb_chunks (title);
 
-insert into cottonil.kb_chunks (chunk_type, title, content, metadata) values
+with seed (chunk_type, title, content, metadata) as (values
 -- ============================================================ glossary / rules of answering
 ('glossary', 'How to answer (rules)',
  'Rules: every number must come from a SQL result on the analytics schema, never from memory. Always state grain and window. Currency EGP, net = net before tax. Windows: FULL 2018-10-19..2026-10-18; trends use complete years 2019-2025; 2018 and 2026 are partial; YTD = Jan-Sep 2026 vs Jan-Sep 2025; snapshot date 2026-10-18. Before answering about any topic, check analytics.data_trust; if status = not_usable, refuse and explain the reason. Do not make causal claims.',
@@ -165,4 +167,11 @@ SQL: select sum(returns) returns, sum(refund_egp) refund_egp from analytics.retu
  'Q: الحملات الإعلانية جابت كام أوردر؟ (any question on a risky topic)
 SQL: select status, safe_to_say, cannot_answer, reason from analytics.data_trust where topic = ''marketing'';
 Then: status is not_usable, so refuse and explain the reason; give safe_to_say only.',
- '{"verified_answer":"not_usable"}');
+ '{"verified_answer":"not_usable"}')),
+up as (
+  insert into cottonil.kb_chunks (chunk_type, title, content, metadata)
+  select chunk_type, title, content, metadata::jsonb from seed
+  on conflict (title) do update set chunk_type = excluded.chunk_type, content = excluded.content, metadata = excluded.metadata
+  where (kb_chunks.chunk_type, kb_chunks.content, kb_chunks.metadata) is distinct from (excluded.chunk_type, excluded.content, excluded.metadata)
+  returning id)
+delete from cottonil.kb_chunks where title not in (select title from seed);
